@@ -191,8 +191,12 @@ never visible to another.
 
 ## What's not implemented
 
-- Retries with backoff on a failed job call (the `MaxRetries` field on
-  `job.Spec` is defined but not yet wired up).
+- Retries with backoff on a failed job call. A failed execution (a
+  network error or a 4xx/5xx response) is currently detected and
+  recorded as `action: "failed"` in the audit log and metrics, but the
+  job isn't automatically retried, it needs to be resubmitted. Retry
+  behavior needs a decision on how retries interact with jobs that are
+  also waiting on a clean grid window before it's worth building.
 - Historical carbon *forecasts* — the scheduler reads the current
   reading each tick rather than planning against a 24-hour forecast the
   way Google's system does. Forecast-aware scheduling would let a job

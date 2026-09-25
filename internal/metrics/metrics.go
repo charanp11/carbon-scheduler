@@ -16,6 +16,7 @@ type Registry struct {
 	released atomic.Uint64
 	held     atomic.Uint64
 	forced   atomic.Uint64
+	failed   atomic.Uint64
 	other    atomic.Uint64
 	pending  atomic.Int64
 }
@@ -26,9 +27,9 @@ func New() *Registry {
 }
 
 // RecordDecision increments the counter for a scheduling action
-// ("released", "held", or "forced"). An unrecognized action is counted
-// separately rather than silently dropped, so the total is always
-// exact for debugging.
+// ("released", "held", "forced", or "failed"). An unrecognized action is
+// counted separately rather than silently dropped, so the total is
+// always exact for debugging.
 func (r *Registry) RecordDecision(action string) {
 	switch action {
 	case "released":
@@ -37,6 +38,8 @@ func (r *Registry) RecordDecision(action string) {
 		r.held.Add(1)
 	case "forced":
 		r.forced.Add(1)
+	case "failed":
+		r.failed.Add(1)
 	default:
 		r.other.Add(1)
 	}
@@ -57,6 +60,7 @@ func (r *Registry) Handler() http.Handler {
 		fmt.Fprintf(w, "carbon_scheduler_jobs_total{action=\"released\"} %d\n", r.released.Load())
 		fmt.Fprintf(w, "carbon_scheduler_jobs_total{action=\"held\"} %d\n", r.held.Load())
 		fmt.Fprintf(w, "carbon_scheduler_jobs_total{action=\"forced\"} %d\n", r.forced.Load())
+		fmt.Fprintf(w, "carbon_scheduler_jobs_total{action=\"failed\"} %d\n", r.failed.Load())
 		fmt.Fprintf(w, "carbon_scheduler_jobs_total{action=\"other\"} %d\n", r.other.Load())
 		fmt.Fprintln(w, "# HELP carbon_scheduler_jobs_pending Jobs currently queued.")
 		fmt.Fprintln(w, "# TYPE carbon_scheduler_jobs_pending gauge")

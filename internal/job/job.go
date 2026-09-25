@@ -24,6 +24,8 @@ const (
 	Urgent
 )
 
+// String renders the priority for logging, e.g. in the scheduler's
+// per-decision audit line.
 func (p Priority) String() string {
 	if p == Urgent {
 		return "urgent"
@@ -49,8 +51,7 @@ type Spec struct {
 	Headers map[string]string
 	Body    []byte
 
-	Timeout    time.Duration
-	MaxRetries int
+	Timeout time.Duration
 }
 
 // Sentinel validation errors, checkable with errors.Is.

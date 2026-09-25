@@ -5,6 +5,7 @@ package scheduler
 import (
 	"container/heap"
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -44,6 +45,12 @@ type Scheduler struct {
 
 	hooksMu sync.Mutex
 	hooks   []func(Decision)
+
+	// tickNow lets Submit wake Run immediately for an urgent job,
+	// instead of it waiting for the next scheduled tick. Without this,
+	// "urgent jobs always run immediately" would only be true up to
+	// the tick interval late, which defeats the point of the priority.
+	tickNow chan struct{}
 }
 
 // New returns a Scheduler that releases flexible jobs once the grid is
@@ -55,18 +62,31 @@ func New(source carbon.Source, threshold carbon.Index) *Scheduler {
 		threshold: threshold,
 		clock:     time.Now,
 		run:       job.Run,
+		tickNow:   make(chan struct{}, 1),
 	}
 }
 
 // Submit validates and enqueues a job. Invalid jobs are rejected here,
-// before they ever reach the scheduling loop.
+// before they ever reach the scheduling loop. Submitting an urgent job
+// wakes an in-progress Run loop right away rather than waiting for its
+// next scheduled tick.
 func (s *Scheduler) Submit(spec job.Spec) error {
 	if err := spec.Validate(); err != nil {
 		return err
 	}
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	heap.Push(s.pq, &queue.Item{Spec: spec})
+	s.mu.Unlock()
+
+	// The wake signal is sent only after the job is actually in the
+	// queue, so Run can never wake up, tick, and find nothing there.
+	if spec.Priority == job.Urgent {
+		select {
+		case s.tickNow <- struct{}{}:
+		default: // a wake is already pending, no need to queue another
+		}
+	}
 	return nil
 }
 
@@ -114,12 +134,21 @@ func (s *Scheduler) notify(d Decision) {
 // straightforward to test exhaustively on its own — this is the entire
 // thesis of the project, so it earns to be the most heavily tested part
 // of it.
-func decide(now time.Time, spec job.Spec, current carbon.Index, threshold carbon.Index) (release bool, forced bool, reason string) {
+//
+// current is nil when this tick's carbon API call failed. Urgent jobs
+// and deadline-forced jobs are evaluated exactly the same either way:
+// neither one should ever depend on a third-party API being reachable.
+// Only a flexible job with time left on its deadline actually needs a
+// reading, and it fails closed (holds) when one isn't available.
+func decide(now time.Time, spec job.Spec, current *carbon.Index, threshold carbon.Index) (release bool, forced bool, reason string) {
 	if spec.Priority == job.Urgent {
 		return true, false, "urgent job, released immediately"
 	}
 	if !spec.Deadline.IsZero() && !now.Before(spec.Deadline) {
 		return true, true, "deadline reached, forced release regardless of grid"
+	}
+	if current == nil {
+		return false, false, "carbon data unavailable this tick, holding as a precaution"
 	}
 	if current.CleanEnough(threshold) {
 		return true, false, "grid intensity at or below threshold"
@@ -130,10 +159,17 @@ func decide(now time.Time, spec job.Spec, current carbon.Index, threshold carbon
 // Tick evaluates every pending job once against current grid conditions,
 // running the ones that should go and re-queuing the ones that should
 // wait. It returns the decisions made, in the order they were evaluated.
+//
+// A failed carbon API call never stalls the whole tick: urgent and
+// deadline-forced jobs are evaluated regardless, only ordinary flexible
+// jobs wait an extra cycle for a reading. The error is logged rather
+// than returned, since jobs were still processed either way.
 func (s *Scheduler) Tick(ctx context.Context) ([]Decision, error) {
-	index, err := s.source.Current(ctx)
-	if err != nil {
-		return nil, err
+	var indexPtr *carbon.Index
+	if index, err := s.source.Current(ctx); err != nil {
+		slog.Warn("carbon intensity unavailable this tick; urgent and deadline-forced jobs still run, other flexible jobs held", "error", err)
+	} else {
+		indexPtr = &index
 	}
 
 	s.mu.Lock()
@@ -148,7 +184,7 @@ func (s *Scheduler) Tick(ctx context.Context) ([]Decision, error) {
 
 	for _, item := range pending {
 		now := s.clock()
-		release, forced, reason := decide(now, item.Spec, index, s.threshold)
+		release, forced, reason := decide(now, item.Spec, indexPtr, s.threshold)
 
 		d := Decision{JobID: item.Spec.ID, Reason: reason, At: now}
 		switch {
@@ -161,14 +197,27 @@ func (s *Scheduler) Tick(ctx context.Context) ([]Decision, error) {
 		}
 
 		if release {
-			s.run(ctx, item.Spec)
+			result := s.run(ctx, item.Spec)
+			if result.Err != nil {
+				d.Action = "failed"
+				d.Reason = fmt.Sprintf("%s; execution error: %v", reason, result.Err)
+			} else if result.StatusCode >= 400 {
+				d.Action = "failed"
+				d.Reason = fmt.Sprintf("%s; endpoint returned status %d", reason, result.StatusCode)
+			}
 		} else {
 			held = append(held, item)
 		}
 
+		gridIndex := "unavailable"
+		if indexPtr != nil {
+			gridIndex = string(*indexPtr)
+		}
+
 		decisions = append(decisions, d)
 		slog.Info("scheduling decision",
-			"job_id", d.JobID, "action", d.Action, "reason", d.Reason, "grid_index", string(index))
+			"job_id", d.JobID, "action", d.Action, "reason", d.Reason,
+			"priority", item.Spec.Priority.String(), "grid_index", gridIndex)
 		s.notify(d)
 	}
 
@@ -192,6 +241,10 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if _, err := s.Tick(ctx); err != nil {
+				slog.Error("scheduler tick failed", "error", err)
+			}
+		case <-s.tickNow:
 			if _, err := s.Tick(ctx); err != nil {
 				slog.Error("scheduler tick failed", "error", err)
 			}
