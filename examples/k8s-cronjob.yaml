@@ -1,0 +1,49 @@
+# Example: a flexible batch job routed through the scheduler instead of
+# running directly on a fixed cron schedule.
+#
+# Instead of Kubernetes triggering the job's container at a fixed time,
+# this CronJob runs frequently (every 15 minutes) and each run just
+# submits the real work to the scheduler's API. The scheduler decides
+# when the job actually executes, holding it until the grid is clean or
+# the deadline forces it, and hits the target URL itself.
+#
+# This is the intended integration shape: existing schedulers keep
+# owning "when should this be considered," the carbon-aware scheduler
+# only owns "given that it's flexible, what's the best moment."
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nightly-report-submitter
+spec:
+  schedule: "*/15 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: submit
+              image: curlimages/curl:latest
+              command:
+                - sh
+                - -c
+                - |
+                  curl -sf -X POST "$SCHEDULER_URL/jobs" \
+                    -H "Authorization: Bearer $SCHEDULER_API_KEY" \
+                    -H "Content-Type: application/json" \
+                    -d '{
+                      "id": "nightly-report",
+                      "priority": "flexible",
+                      "deadline": "'"$(date -u -d '+6 hours' +%Y-%m-%dT%H:%M:%SZ)"'",
+                      "method": "POST",
+                      "url": "https://internal.example.com/jobs/generate-report",
+                      "timeout_seconds": 120
+                    }'
+              env:
+                - name: SCHEDULER_URL
+                  value: "http://carbon-scheduler.internal:8080"
+                - name: SCHEDULER_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: carbon-scheduler-api-key
+                      key: key
+          restartPolicy: Never
