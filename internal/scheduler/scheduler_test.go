@@ -333,3 +333,21 @@ func TestSubmitRejectsInvalidJob(t *testing.T) {
 		t.Errorf("invalid job should never be queued, got %d pending", got)
 	}
 }
+
+func TestSubmitRejectsOnceQueueIsFull(t *testing.T) {
+	s := New(fakeSource{index: carbon.Low}, carbon.Low)
+	s.SetMaxPending(1)
+
+	future := time.Now().Add(time.Hour)
+	if err := s.Submit(job.Spec{ID: "a", Method: http.MethodPost, URL: "https://example.com", Deadline: future}); err != nil {
+		t.Fatalf("first Submit() error = %v", err)
+	}
+
+	err := s.Submit(job.Spec{ID: "b", Method: http.MethodPost, URL: "https://example.com", Deadline: future})
+	if !errors.Is(err, ErrQueueFull) {
+		t.Errorf("second Submit() error = %v, want %v", err, ErrQueueFull)
+	}
+	if got := s.Pending(); got != 1 {
+		t.Errorf("rejected job should not be queued, got %d pending", got)
+	}
+}

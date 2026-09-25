@@ -5,6 +5,7 @@ package scheduler
 import (
 	"container/heap"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -14,6 +15,13 @@ import (
 	"github.com/charanp11/carbon-scheduler/internal/job"
 	"github.com/charanp11/carbon-scheduler/internal/queue"
 )
+
+// ErrQueueFull is returned by Submit once the pending queue is at
+// capacity, so an unbounded backlog can't be used to exhaust memory.
+var ErrQueueFull = errors.New("scheduler: pending queue is full")
+
+// defaultMaxPending is the cap used unless SetMaxPending overrides it.
+const defaultMaxPending = 10_000
 
 // Decision records what the scheduler chose to do with a job on a given
 // tick and why. Every decision is logged, forming the audit trail for
@@ -51,31 +59,45 @@ type Scheduler struct {
 	// "urgent jobs always run immediately" would only be true up to
 	// the tick interval late, which defeats the point of the priority.
 	tickNow chan struct{}
+
+	maxPending int
 }
 
 // New returns a Scheduler that releases flexible jobs once the grid is
 // at or below threshold, or once their deadline forces the issue.
 func New(source carbon.Source, threshold carbon.Index) *Scheduler {
 	return &Scheduler{
-		pq:        queue.New(),
-		source:    source,
-		threshold: threshold,
-		clock:     time.Now,
-		run:       job.Run,
-		tickNow:   make(chan struct{}, 1),
+		pq:         queue.New(),
+		source:     source,
+		threshold:  threshold,
+		clock:      time.Now,
+		run:        job.Run,
+		tickNow:    make(chan struct{}, 1),
+		maxPending: defaultMaxPending,
 	}
 }
 
+// SetMaxPending overrides the default cap on queued jobs (10,000). Call
+// it once during setup, before Submit is in concurrent use.
+func (s *Scheduler) SetMaxPending(n int) {
+	s.maxPending = n
+}
+
 // Submit validates and enqueues a job. Invalid jobs are rejected here,
-// before they ever reach the scheduling loop. Submitting an urgent job
-// wakes an in-progress Run loop right away rather than waiting for its
-// next scheduled tick.
+// before they ever reach the scheduling loop, and a full queue is
+// rejected with ErrQueueFull rather than growing without bound.
+// Submitting an urgent job wakes an in-progress Run loop right away
+// rather than waiting for its next scheduled tick.
 func (s *Scheduler) Submit(spec job.Spec) error {
 	if err := spec.Validate(); err != nil {
 		return err
 	}
 
 	s.mu.Lock()
+	if s.pq.Len() >= s.maxPending {
+		s.mu.Unlock()
+		return ErrQueueFull
+	}
 	heap.Push(s.pq, &queue.Item{Spec: spec})
 	s.mu.Unlock()
 

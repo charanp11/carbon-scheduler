@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -201,7 +202,13 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.sched.Submit(spec); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		// A full queue is server capacity, not a bad request: the
+		// client did nothing wrong, so it gets 503, not 400.
+		status := http.StatusBadRequest
+		if errors.Is(err, scheduler.ErrQueueFull) {
+			status = http.StatusServiceUnavailable
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -33,6 +34,7 @@ func run() error {
 	dataDir := envOr("SCHEDULER_DATA_DIR", "./data")
 	threshold := carbon.Index(envOr("SCHEDULER_THRESHOLD", string(carbon.Low)))
 	tickInterval := envDuration("SCHEDULER_TICK_INTERVAL", 5*time.Minute)
+	maxPending := envInt("SCHEDULER_MAX_PENDING", 10_000)
 
 	apiKeys, err := parseAPIKeys(os.Getenv("SCHEDULER_API_KEYS"))
 	if err != nil {
@@ -48,6 +50,7 @@ func run() error {
 	}
 
 	sched := scheduler.New(carbon.NewClient(), threshold)
+	sched.SetMaxPending(maxPending)
 
 	// Restore anything that was still waiting on a cleaner grid window
 	// when the process last stopped.
@@ -112,6 +115,19 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		slog.Warn("invalid integer, using default", "key", key, "value", v, "default", fallback)
+		return fallback
+	}
+	return n
 }
 
 func envDuration(key string, fallback time.Duration) time.Duration {

@@ -65,7 +65,11 @@ features:
   A lookup for someone else's job returns 404, not 403, so existence
   itself isn't information a caller gets for free.
 - **Per-owner rate limiting** (a small stdlib-only token bucket) means
-  no single API key can flood the queue.
+  no single API key can flood the queue, and **a hard cap on total
+  pending jobs** (`SCHEDULER_MAX_PENDING`) means the queue itself can't
+  be grown into an out-of-memory condition even by a caller staying
+  under the rate limit over time. A full queue returns 503, not 400:
+  the caller did nothing wrong, the server is just at capacity.
 - **Every outbound job call has a bounded timeout**, so a slow or
   unresponsive endpoint can never hang the scheduling loop.
 - **Every scheduling decision is logged with its reason** ("released:
@@ -104,7 +108,8 @@ Environment variables:
 | `SCHEDULER_DATA_DIR`         | `./data`   | where the queue snapshot and audit log are written    |
 | `SCHEDULER_THRESHOLD`        | `low`      | cleanest-acceptable band before early release (`very low`, `low`, `moderate`, `high`, `very high`) |
 | `SCHEDULER_TICK_INTERVAL`    | `5m`       | how often pending jobs are re-evaluated               |
-| `SCHEDULER_API_KEYS`         | *(required)* | comma-separated `key:owner` pairs, e.g. `abc123:alice,def456:bob` |
+| `SCHEDULER_MAX_PENDING`      | `10000`    | cap on jobs queued at once; `Submit` rejects with 503 once it's full |
+| `SCHEDULER_API_KEYS`         | *(required)* | comma-separated `key:owner` pairs you choose yourself, e.g. `abc123:alice,def456:bob` — nothing to sign up for, this just authenticates callers of *your* service |
 
 Submit a job:
 
