@@ -1,4 +1,4 @@
 /data/
 *.tmp
-scheduler
+/scheduler
 /bin/
